@@ -127,38 +127,97 @@ const ConnectMachines = () => {
   const [isProcessing, setIsProcessing] = useState(false);
   const [showOpcModal, setShowOpcModal] = useState(false);
 
-  // OPC Connection Logic
-  const connectToOPC = async () => {
+  const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:3000";
+
+  const fetchOpcStatus = async () => {
+    try {
+  const res = await fetch(`${API_BASE}/api/v1/spectrometer/opc-status`);
+      if (!res.ok) {
+        // server responded but not OK -> treat as disconnected
+        setOpcConnected(false);
+        setMachines((prev) => prev.map((m) => ({ ...m, status: 'disconnected' })));
+        throw new Error('Status fetch failed');
+      }
+
+      const json = await res.json();
+      // expect { opcConnected: boolean, machines: [{id, status}] }
+      if (json.opcConnected != null) {
+        setOpcConnected(Boolean(json.opcConnected));
+        if (!json.opcConnected) {
+          // server explicitly reports disconnected -> mark machines disconnected
+          setMachines((prev) => prev.map((m) => ({ ...m, status: 'disconnected' })));
+        }
+      }
+
+      if (Array.isArray(json.machines)) {
+        setMachines((prev) => prev.map((m) => {
+          const found = json.machines.find((x) => x.id === m.id);
+          if (found && found.status) return { ...m, status: found.status };
+          return m;
+        }));
+      }
+    } catch (e) {
+      // on any error (network refused, parse error, etc.) mark disconnected
+      setOpcConnected(false);
+      setMachines((prev) => prev.map((m) => ({ ...m, status: 'disconnected' })));
+      // eslint-disable-next-line no-console
+      console.warn('Could not fetch OPC status, marking disconnected', e);
+    }
+  };
+
+  const apiConnect = async () => {
     setIsConnecting(true);
     try {
-      await new Promise((resolve) => setTimeout(resolve, 3000));
-      
-      const updatedMachines = machines.map((machine) => ({
-        ...machine,
-        status: Math.random() > 0.2 ? "connected" : "error",
-        lastSeen: new Date().toISOString(),
-      }));
-      
-      setMachines(updatedMachines);
+  const res = await fetch(`${API_BASE}/api/v1/spectrometer/opc-connect`, { method: 'POST' });
+      if (!res.ok) throw new Error('Connect failed');
+      const json = await res.json();
+      // server may return success flag
       setOpcConnected(true);
-      
-      notification.success({
-        message: "OPC Connection Established",
-        description: "Successfully connected to industrial machines",
-        placement: "topRight",
-      });
-      
-      startDataCollection();
-    } catch (error) {
-      notification.error({
-        message: "OPC Connection Failed",
-        description: "Unable to connect to OPC server",
-        placement: "topRight",
-      });
+      // set all devices to connected per requirement
+      setMachines((prev) => prev.map((m) => ({ ...m, status: 'connected' })));
+      notification.success({ message: 'OPC Connected', description: 'Backend OPC connection established', placement: 'topRight' });
+    } catch (e) {
+      notification.error({ message: 'OPC Connect Failed', description: e.message || 'Could not connect', placement: 'topRight' });
     } finally {
       setIsConnecting(false);
     }
   };
+
+  const apiDisconnect = async () => {
+    try {
+  await fetch(`${API_BASE}/api/v1/spectrometer/opc-disconnect`, { method: 'POST' });
+    } catch (e) {
+      // ignore
+    } finally {
+      setOpcConnected(false);
+      setMachines((prev) => prev.map((m) => ({ ...m, status: 'disconnected' })));
+      notification.info({ message: 'OPC Disconnected', placement: 'topRight' });
+    }
+  };
+
+  // Polling-based status watcher (server only exposes REST status endpoint)
+  React.useEffect(() => {
+    let cancelled = false;
+    let timerId = null;
+
+    const POLL_INTERVAL_MS = 2000;
+
+    const poll = async () => {
+      // call the status endpoint and update state
+      await fetchOpcStatus();
+      if (cancelled) return;
+      timerId = setTimeout(poll, POLL_INTERVAL_MS);
+    };
+
+    // start immediate poll
+    poll();
+
+    // cleanup
+    return () => {
+      cancelled = true;
+      if (timerId) clearTimeout(timerId);
+    };
+  }, []);
 
   const startDataCollection = () => {
     const interval = setInterval(() => {
@@ -406,7 +465,7 @@ const ConnectMachines = () => {
           type={opcConnected ? "default" : "primary"}
           size="large"
           loading={isConnecting}
-          onClick={opcConnected ? () => setOpcConnected(false) : connectToOPC}
+          onClick={opcConnected ? apiDisconnect : apiConnect}
           className={`${
             opcConnected
               ? "bg-gray-500 hover:bg-gray-600 border-gray-500 text-white"
@@ -429,7 +488,6 @@ const ConnectMachines = () => {
                 {getStatusIcon(machine.status)}
                 <div>
                   <h4 className="font-semibold text-gray-800 text-sm">{machine.name}</h4>
-                  <p className="text-xs text-gray-500">{machine.ip}</p>
                 </div>
               </div>
               <Badge
@@ -438,16 +496,7 @@ const ConnectMachines = () => {
               />
             </div>
             
-            {machine.status === "connected" && (
-              <div className="text-xs text-gray-600 bg-gray-50 p-2 rounded-lg">
-                <div className="flex justify-between items-center">
-                  <span>Last Update:</span>
-                  <span className="font-mono">
-                    {machine.lastSeen ? new Date(machine.lastSeen).toLocaleTimeString() : "Never"}
-                  </span>
-                </div>
-              </div>
-            )}
+            {/* Removed IP and last-updated per backend-driven devices */}
           </div>
         ))}
       </div>

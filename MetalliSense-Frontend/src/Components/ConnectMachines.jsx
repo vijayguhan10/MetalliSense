@@ -1,4 +1,5 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
+import axios from "axios";
 import {
   Card,
   Input,
@@ -126,58 +127,68 @@ const ConnectMachines = () => {
   const [predictions, setPredictions] = useState(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [showOpcModal, setShowOpcModal] = useState(false);
+  const [metalGrades, setMetalGrades] = useState([]);
+  const [metalGradeLoading, setMetalGradeLoading] = useState(false);
+  const [selectedMetalGrade, setSelectedMetalGrade] = useState(null);
 
   const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:3000";
 
+  const api = useMemo(() => axios.create({ baseURL: API_BASE }), [API_BASE]);
+
   const fetchOpcStatus = async () => {
     try {
-  const res = await fetch(`${API_BASE}/api/v1/spectrometer/opc-status`);
-      if (!res.ok) {
-        // server responded but not OK -> treat as disconnected
-        setOpcConnected(false);
-        setMachines((prev) => prev.map((m) => ({ ...m, status: 'disconnected' })));
-        throw new Error('Status fetch failed');
-      }
-
-      const json = await res.json();
+      const res = await api.get("/api/v1/spectrometer/opc-status");
+      const json = res.data;
       // expect { opcConnected: boolean, machines: [{id, status}] }
       if (json.opcConnected != null) {
         setOpcConnected(Boolean(json.opcConnected));
         if (!json.opcConnected) {
           // server explicitly reports disconnected -> mark machines disconnected
-          setMachines((prev) => prev.map((m) => ({ ...m, status: 'disconnected' })));
+          setMachines((prev) =>
+            prev.map((m) => ({ ...m, status: "disconnected" }))
+          );
         }
       }
 
       if (Array.isArray(json.machines)) {
-        setMachines((prev) => prev.map((m) => {
-          const found = json.machines.find((x) => x.id === m.id);
-          if (found && found.status) return { ...m, status: found.status };
-          return m;
-        }));
+        setMachines((prev) =>
+          prev.map((m) => {
+            const found = json.machines.find((x) => x.id === m.id);
+            if (found && found.status) return { ...m, status: found.status };
+            return m;
+          })
+        );
       }
     } catch (e) {
       // on any error (network refused, parse error, etc.) mark disconnected
       setOpcConnected(false);
-      setMachines((prev) => prev.map((m) => ({ ...m, status: 'disconnected' })));
+      setMachines((prev) =>
+        prev.map((m) => ({ ...m, status: "disconnected" }))
+      );
       // eslint-disable-next-line no-console
-      console.warn('Could not fetch OPC status, marking disconnected', e);
+      console.warn("Could not fetch OPC status, marking disconnected", e);
     }
   };
 
   const apiConnect = async () => {
     setIsConnecting(true);
     try {
-  const res = await fetch(`${API_BASE}/api/v1/spectrometer/opc-connect`, { method: 'POST' });
-      if (!res.ok) throw new Error('Connect failed');
-      const json = await res.json();
-      // server may return success flag
+      const res = await api.post("/api/v1/spectrometer/opc-connect");
+      // server may return success flag in res.data
       setOpcConnected(true);
       // set all devices to connected per requirement
-      setMachines((prev) => prev.map((m) => ({ ...m, status: 'connected' })));
-      notification.success({ message: 'OPC Connected', description: 'Backend OPC connection established', placement: 'topRight' });
+      setMachines((prev) => prev.map((m) => ({ ...m, status: "connected" })));
+      notification.success({
+        message: "OPC Connected",
+        description: "Backend OPC connection established",
+        placement: "topRight",
+      });
     } catch (e) {
-      notification.error({ message: 'OPC Connect Failed', description: e.message || 'Could not connect', placement: 'topRight' });
+      notification.error({
+        message: "OPC Connect Failed",
+        description: e.message || "Could not connect",
+        placement: "topRight",
+      });
     } finally {
       setIsConnecting(false);
     }
@@ -185,18 +196,20 @@ const ConnectMachines = () => {
 
   const apiDisconnect = async () => {
     try {
-  await fetch(`${API_BASE}/api/v1/spectrometer/opc-disconnect`, { method: 'POST' });
+      await api.post("/api/v1/spectrometer/opc-disconnect");
     } catch (e) {
       // ignore
     } finally {
       setOpcConnected(false);
-      setMachines((prev) => prev.map((m) => ({ ...m, status: 'disconnected' })));
-      notification.info({ message: 'OPC Disconnected', placement: 'topRight' });
+      setMachines((prev) =>
+        prev.map((m) => ({ ...m, status: "disconnected" }))
+      );
+      notification.info({ message: "OPC Disconnected", placement: "topRight" });
     }
   };
 
   // Polling-based status watcher (server only exposes REST status endpoint)
-  React.useEffect(() => {
+  useEffect(() => {
     let cancelled = false;
     let timerId = null;
 
@@ -219,13 +232,45 @@ const ConnectMachines = () => {
     };
   }, []);
 
+  // Fetch metal grade names for dropdown
+  const fetchMetalGrades = async () => {
+    setMetalGradeLoading(true);
+    try {
+      const res = await api.get("/api/v1/metal-grades/names");
+      const body = res.data;
+      // handle different possible shapes. Preferred: { status, results, data: { gradeNames: [...] } }
+      const candidates = [];
+      if (body && body.data && Array.isArray(body.data.gradeNames))
+        candidates.push(body.data.gradeNames);
+      if (body && Array.isArray(body)) candidates.push(body);
+      if (body && Array.isArray(body.gradeNames))
+        candidates.push(body.gradeNames);
+
+      const grades = candidates.length > 0 ? candidates[0] : [];
+      if (Array.isArray(grades)) {
+        setMetalGrades(grades);
+        if (grades.length > 0 && !selectedMetalGrade)
+          setSelectedMetalGrade(grades[0]);
+      }
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn("Could not fetch metal grades", e);
+    } finally {
+      setMetalGradeLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchMetalGrades();
+  }, []);
+
   const startDataCollection = () => {
     const interval = setInterval(() => {
       setMachines((prev) =>
         prev.map((machine) => {
           if (machine.status === "connected") {
             let newData = { ...machine.data };
-            
+
             switch (machine.type) {
               case "temperature":
                 newData = {
@@ -262,7 +307,7 @@ const ConnectMachines = () => {
                 };
                 break;
             }
-            
+
             return {
               ...machine,
               data: newData,
@@ -281,7 +326,8 @@ const ConnectMachines = () => {
     if (!opcConnected) {
       notification.warning({
         message: "OPC Connection Required",
-        description: "Please establish OPC connection before generating predictions",
+        description:
+          "Please establish OPC connection before generating predictions",
         placement: "topRight",
       });
       return;
@@ -301,39 +347,44 @@ const ConnectMachines = () => {
         cost_savings: Math.floor(Math.random() * 5000) + 2000,
         processing_time_reduction: Math.floor(Math.random() * 30) + 15,
         quality_improvement: Math.floor(Math.random() * 15) + 8,
-        deviation_reason: "Cu content slightly higher due to scrap composition variance",
+        deviation_reason:
+          "Cu content slightly higher due to scrap composition variance",
         optimization_confidence: Math.floor(Math.random() * 10) + 90,
         environmental_impact: {
           co2_reduction: Math.random() * 15 + 5,
           waste_reduction: Math.random() * 20 + 10,
-          water_savings: Math.random() * 500 + 200
+          water_savings: Math.random() * 500 + 200,
         },
         process_recommendations: [
           {
             title: "Temperature Optimization",
-            description: "Reduce Zone 2 temperature by 5°C for better energy efficiency",
+            description:
+              "Reduce Zone 2 temperature by 5°C for better energy efficiency",
             priority: "High",
-            estimated_savings: "$1,200"
+            estimated_savings: "$1,200",
           },
           {
             title: "Stirring Duration",
-            description: "Increase stirring time by 2 minutes for better homogeneity",
+            description:
+              "Increase stirring time by 2 minutes for better homogeneity",
             priority: "Medium",
-            estimated_savings: "$800"
+            estimated_savings: "$800",
           },
           {
             title: "Material Sequencing",
-            description: "Add copper before silicon for optimal alloy formation",
+            description:
+              "Add copper before silicon for optimal alloy formation",
             priority: "High",
-            estimated_savings: "$950"
-          }
+            estimated_savings: "$950",
+          },
         ],
         impact_analysis: {
           mechanical_properties: "Tensile strength +2.3%",
           corrosion_resistance: "Standard performance maintained",
           production_delay: "No delays expected",
         },
-        notes: "Optimal mixing parameters achieved. Consider reducing Zone 2 temperature by 5°C for better energy efficiency.",
+        notes:
+          "Optimal mixing parameters achieved. Consider reducing Zone 2 temperature by 5°C for better energy efficiency.",
       });
       setIsProcessing(false);
     }, 2000);
@@ -385,7 +436,9 @@ const ConnectMachines = () => {
   const FurnaceZoneVisualization = () => (
     <div className="relative">
       <div className="text-center mb-6">
-        <h3 className="text-lg font-semibold text-gray-700 mb-2">Furnace Zone Status</h3>
+        <h3 className="text-lg font-semibold text-gray-700 mb-2">
+          Furnace Zone Status
+        </h3>
         <Badge
           status={opcConnected ? "processing" : "default"}
           text={opcConnected ? "Live Data" : "Static Data"}
@@ -451,13 +504,25 @@ const ConnectMachines = () => {
     <Card className="bg-gradient-to-br from-gray-50 via-gray-100 to-emerald-50 border-gray-200 shadow-xl">
       <div className="flex items-center justify-between mb-6">
         <div className="flex items-center space-x-3">
-          <div className={`p-2 rounded-lg ${opcConnected ? 'bg-emerald-100' : 'bg-gray-100'}`}>
-            <Server className={`w-6 h-6 ${opcConnected ? 'text-emerald-600' : 'text-gray-500'}`} />
+          <div
+            className={`p-2 rounded-lg ${
+              opcConnected ? "bg-emerald-100" : "bg-gray-100"
+            }`}
+          >
+            <Server
+              className={`w-6 h-6 ${
+                opcConnected ? "text-emerald-600" : "text-gray-500"
+              }`}
+            />
           </div>
           <div>
-            <h3 className="text-lg font-semibold text-gray-800">OPC Server Connection</h3>
+            <h3 className="text-lg font-semibold text-gray-800">
+              OPC Server Connection
+            </h3>
             <p className="text-sm text-gray-600">
-              {opcConnected ? "Connected to industrial machines" : "Connect to start data collection"}
+              {opcConnected
+                ? "Connected to industrial machines"
+                : "Connect to start data collection"}
             </p>
           </div>
         </div>
@@ -471,9 +536,19 @@ const ConnectMachines = () => {
               ? "bg-gray-500 hover:bg-gray-600 border-gray-500 text-white"
               : "bg-gradient-to-r from-emerald-500 to-emerald-600 border-none"
           } shadow-lg`}
-          icon={opcConnected ? <Power className="w-4 h-4" /> : <Cable className="w-4 h-4" />}
+          icon={
+            opcConnected ? (
+              <Power className="w-4 h-4" />
+            ) : (
+              <Cable className="w-4 h-4" />
+            )
+          }
         >
-          {isConnecting ? "Connecting..." : opcConnected ? "Disconnect" : "Connect OPC"}
+          {isConnecting
+            ? "Connecting..."
+            : opcConnected
+            ? "Disconnect"
+            : "Connect OPC"}
         </Button>
       </div>
 
@@ -487,15 +562,23 @@ const ConnectMachines = () => {
               <div className="flex items-center space-x-3">
                 {getStatusIcon(machine.status)}
                 <div>
-                  <h4 className="font-semibold text-gray-800 text-sm">{machine.name}</h4>
+                  <h4 className="font-semibold text-gray-800 text-sm">
+                    {machine.name}
+                  </h4>
                 </div>
               </div>
               <Badge
-                color={machine.status === "connected" ? "green" : machine.status === "error" ? "gray" : "gray"}
+                color={
+                  machine.status === "connected"
+                    ? "green"
+                    : machine.status === "error"
+                    ? "gray"
+                    : "gray"
+                }
                 text={machine.status}
               />
             </div>
-            
+
             {/* Removed IP and last-updated per backend-driven devices */}
           </div>
         ))}
@@ -505,7 +588,9 @@ const ConnectMachines = () => {
         <div className="flex items-center space-x-2 text-emerald-700">
           <Globe className="w-4 h-4" />
           <span className="text-sm font-medium">
-            {opcConnected ? "Real-time data streaming active" : "Connect to enable live data feed"}
+            {opcConnected
+              ? "Real-time data streaming active"
+              : "Connect to enable live data feed"}
           </span>
         </div>
       </div>
@@ -523,8 +608,12 @@ const ConnectMachines = () => {
             <div className="inline-flex items-center justify-center w-16 h-16 bg-gradient-to-br from-emerald-500 to-emerald-600 rounded-2xl shadow-lg mb-4">
               <Award className="w-8 h-8 text-white" />
             </div>
-            <h2 className="text-3xl font-bold text-gray-800 mb-2">ML Optimization Results</h2>
-            <p className="text-gray-600 text-lg">AI-powered metallurgical process enhancement</p>
+            <h2 className="text-3xl font-bold text-gray-800 mb-2">
+              ML Optimization Results
+            </h2>
+            <p className="text-gray-600 text-lg">
+              AI-powered metallurgical process enhancement
+            </p>
           </div>
 
           <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
@@ -549,10 +638,14 @@ const ConnectMachines = () => {
               <div className="text-3xl font-bold text-gray-800 mb-1">
                 {predictions.iterations_saved}
               </div>
-              <div className="text-sm text-gray-600 font-medium">Iterations Saved</div>
+              <div className="text-sm text-gray-600 font-medium">
+                Iterations Saved
+              </div>
               <div className="flex items-center justify-center mt-1">
                 <TrendingDown className="w-3 h-3 text-emerald-500 mr-1" />
-                <span className="text-xs text-emerald-600">-{predictions.processing_time_reduction}%</span>
+                <span className="text-xs text-emerald-600">
+                  -{predictions.processing_time_reduction}%
+                </span>
               </div>
             </div>
 
@@ -563,10 +656,15 @@ const ConnectMachines = () => {
               <div className="text-3xl font-bold text-gray-800 mb-1">
                 {predictions.energy_saving}%
               </div>
-              <div className="text-sm text-gray-600 font-medium">Energy Saved</div>
+              <div className="text-sm text-gray-600 font-medium">
+                Energy Saved
+              </div>
               <div className="flex items-center justify-center mt-1">
                 <ArrowDown className="w-3 h-3 text-emerald-500 mr-1" />
-                <span className="text-xs text-emerald-600">-{predictions.environmental_impact.co2_reduction.toFixed(1)}t CO₂</span>
+                <span className="text-xs text-emerald-600">
+                  -{predictions.environmental_impact.co2_reduction.toFixed(1)}t
+                  CO₂
+                </span>
               </div>
             </div>
 
@@ -577,10 +675,14 @@ const ConnectMachines = () => {
               <div className="text-3xl font-bold text-gray-800 mb-1">
                 ${(predictions.cost_savings / 1000).toFixed(1)}K
               </div>
-              <div className="text-sm text-gray-600 font-medium">Cost Savings</div>
+              <div className="text-sm text-gray-600 font-medium">
+                Cost Savings
+              </div>
               <div className="flex items-center justify-center mt-1">
                 <ArrowUp className="w-3 h-3 text-emerald-500 mr-1" />
-                <span className="text-xs text-emerald-600">+{predictions.quality_improvement}% quality</span>
+                <span className="text-xs text-emerald-600">
+                  +{predictions.quality_improvement}% quality
+                </span>
               </div>
             </div>
           </div>
@@ -595,8 +697,12 @@ const ConnectMachines = () => {
                   <Beaker className="w-6 h-6 text-emerald-600" />
                 </div>
                 <div>
-                  <h3 className="text-2xl font-bold text-gray-800">Optimized Metal Additions</h3>
-                  <p className="text-gray-600">Precision dosing recommendations</p>
+                  <h3 className="text-2xl font-bold text-gray-800">
+                    Optimized Metal Additions
+                  </h3>
+                  <p className="text-gray-600">
+                    Precision dosing recommendations
+                  </p>
                 </div>
               </div>
               <div className="bg-emerald-100 px-4 py-2 rounded-full">
@@ -622,7 +728,7 @@ const ConnectMachines = () => {
                   progress: 85,
                 },
                 {
-                  metal: "Copper", 
+                  metal: "Copper",
                   symbol: "Cu",
                   value: predictions.additions.cu_add_kg,
                   unit: "kg",
@@ -634,7 +740,7 @@ const ConnectMachines = () => {
                 },
                 {
                   metal: "Silicon",
-                  symbol: "Si", 
+                  symbol: "Si",
                   value: predictions.additions.si_add_kg,
                   unit: "kg",
                   color: "from-gray-200 to-gray-300",
@@ -650,30 +756,46 @@ const ConnectMachines = () => {
                 >
                   <div className="flex items-center justify-between mb-4">
                     <div className={`p-3 ${item.iconBg} rounded-xl`}>
-                      <span className={`text-2xl font-bold ${item.textColor}`}>{item.symbol}</span>
+                      <span className={`text-2xl font-bold ${item.textColor}`}>
+                        {item.symbol}
+                      </span>
                     </div>
                     <div className="text-right">
                       <div className={`text-3xl font-bold ${item.textColor}`}>
                         {item.value.toFixed(2)}
                       </div>
-                      <div className={`text-sm ${item.textColor} opacity-80`}>{item.unit}</div>
+                      <div className={`text-sm ${item.textColor} opacity-80`}>
+                        {item.unit}
+                      </div>
                     </div>
                   </div>
-                  
+
                   <div className="mb-4">
-                    <div className={`text-lg font-semibold ${item.textColor} mb-2`}>{item.metal}</div>
+                    <div
+                      className={`text-lg font-semibold ${item.textColor} mb-2`}
+                    >
+                      {item.metal}
+                    </div>
                     <div className="w-full bg-white/50 rounded-full h-2">
                       <div
-                        className={`bg-gradient-to-r ${item.progress > 90 ? 'from-emerald-400 to-emerald-500' : 'from-gray-400 to-gray-500'} h-2 rounded-full transition-all duration-1000`}
+                        className={`bg-gradient-to-r ${
+                          item.progress > 90
+                            ? "from-emerald-400 to-emerald-500"
+                            : "from-gray-400 to-gray-500"
+                        } h-2 rounded-full transition-all duration-1000`}
                         style={{ width: `${item.progress}%` }}
                       ></div>
                     </div>
-                    <div className={`text-xs ${item.textColor} opacity-70 mt-1`}>
+                    <div
+                      className={`text-xs ${item.textColor} opacity-70 mt-1`}
+                    >
                       Optimization: {item.progress}%
                     </div>
                   </div>
 
-                  <div className={`text-xs ${item.textColor} opacity-80 bg-white/30 p-2 rounded-lg`}>
+                  <div
+                    className={`text-xs ${item.textColor} opacity-80 bg-white/30 p-2 rounded-lg`}
+                  >
                     Target composition achieved with minimal waste
                   </div>
                 </div>
@@ -690,8 +812,12 @@ const ConnectMachines = () => {
                 <Cpu className="w-6 h-6 text-emerald-600" />
               </div>
               <div>
-                <h3 className="text-2xl font-bold text-gray-800">AI Process Recommendations</h3>
-                <p className="text-gray-600">Intelligent optimization suggestions</p>
+                <h3 className="text-2xl font-bold text-gray-800">
+                  AI Process Recommendations
+                </h3>
+                <p className="text-gray-600">
+                  Intelligent optimization suggestions
+                </p>
               </div>
             </div>
           </div>
@@ -702,24 +828,30 @@ const ConnectMachines = () => {
                 <div
                   key={index}
                   className={`p-5 rounded-xl border-l-4 ${
-                    rec.priority === 'High' 
-                      ? 'border-emerald-500 bg-emerald-50' 
-                      : 'border-gray-400 bg-gray-50'
+                    rec.priority === "High"
+                      ? "border-emerald-500 bg-emerald-50"
+                      : "border-gray-400 bg-gray-50"
                   } hover:shadow-lg transition-all duration-300`}
                 >
                   <div className="flex items-start justify-between">
                     <div className="flex-1">
                       <div className="flex items-center space-x-3 mb-2">
-                        <h4 className="font-bold text-gray-800 text-lg">{rec.title}</h4>
-                        <span className={`px-3 py-1 rounded-full text-xs font-semibold ${
-                          rec.priority === 'High' 
-                            ? 'bg-emerald-100 text-emerald-700' 
-                            : 'bg-gray-100 text-gray-700'
-                        }`}>
+                        <h4 className="font-bold text-gray-800 text-lg">
+                          {rec.title}
+                        </h4>
+                        <span
+                          className={`px-3 py-1 rounded-full text-xs font-semibold ${
+                            rec.priority === "High"
+                              ? "bg-emerald-100 text-emerald-700"
+                              : "bg-gray-100 text-gray-700"
+                          }`}
+                        >
                           {rec.priority} Priority
                         </span>
                       </div>
-                      <p className="text-gray-600 mb-3 leading-relaxed">{rec.description}</p>
+                      <p className="text-gray-600 mb-3 leading-relaxed">
+                        {rec.description}
+                      </p>
                       <div className="flex items-center space-x-4">
                         <div className="flex items-center space-x-1">
                           <TrendingUp className="w-4 h-4 text-emerald-500" />
@@ -729,10 +861,14 @@ const ConnectMachines = () => {
                         </div>
                       </div>
                     </div>
-                    <div className={`p-2 rounded-lg ${
-                      rec.priority === 'High' ? 'bg-emerald-100' : 'bg-gray-100'
-                    }`}>
-                      {rec.priority === 'High' ? (
+                    <div
+                      className={`p-2 rounded-lg ${
+                        rec.priority === "High"
+                          ? "bg-emerald-100"
+                          : "bg-gray-100"
+                      }`}
+                    >
+                      {rec.priority === "High" ? (
                         <Flame className="w-5 h-5 text-emerald-600" />
                       ) : (
                         <Wrench className="w-5 h-5 text-gray-600" />
@@ -753,8 +889,12 @@ const ConnectMachines = () => {
                 <Shield className="w-6 h-6 text-emerald-600" />
               </div>
               <div>
-                <h3 className="text-2xl font-bold text-gray-800">Environmental Impact</h3>
-                <p className="text-gray-600">Sustainability metrics and improvements</p>
+                <h3 className="text-2xl font-bold text-gray-800">
+                  Environmental Impact
+                </h3>
+                <p className="text-gray-600">
+                  Sustainability metrics and improvements
+                </p>
               </div>
             </div>
           </div>
@@ -767,9 +907,12 @@ const ConnectMachines = () => {
                     <Activity className="w-8 h-8 text-emerald-600" />
                   </div>
                   <div className="text-2xl font-bold text-gray-800 mb-1">
-                    {predictions.environmental_impact.co2_reduction.toFixed(1)} tons
+                    {predictions.environmental_impact.co2_reduction.toFixed(1)}{" "}
+                    tons
                   </div>
-                  <div className="text-sm text-gray-600 font-medium">CO₂ Reduction</div>
+                  <div className="text-sm text-gray-600 font-medium">
+                    CO₂ Reduction
+                  </div>
                 </div>
               </div>
 
@@ -779,9 +922,14 @@ const ConnectMachines = () => {
                     <RotateCcw className="w-8 h-8 text-gray-600" />
                   </div>
                   <div className="text-2xl font-bold text-gray-800 mb-1">
-                    {predictions.environmental_impact.waste_reduction.toFixed(1)}%
+                    {predictions.environmental_impact.waste_reduction.toFixed(
+                      1
+                    )}
+                    %
                   </div>
-                  <div className="text-sm text-gray-600 font-medium">Waste Reduction</div>
+                  <div className="text-sm text-gray-600 font-medium">
+                    Waste Reduction
+                  </div>
                 </div>
               </div>
 
@@ -793,7 +941,9 @@ const ConnectMachines = () => {
                   <div className="text-2xl font-bold text-gray-800 mb-1">
                     {predictions.environmental_impact.water_savings.toFixed(0)}L
                   </div>
-                  <div className="text-sm text-gray-600 font-medium">Water Savings</div>
+                  <div className="text-sm text-gray-600 font-medium">
+                    Water Savings
+                  </div>
                 </div>
               </div>
             </div>
@@ -807,7 +957,9 @@ const ConnectMachines = () => {
               <div className="p-2 bg-gray-100 rounded-lg">
                 <AlertTriangle className="w-6 h-6 text-gray-600" />
               </div>
-              <h3 className="text-2xl font-bold text-gray-800">Process Analysis & Insights</h3>
+              <h3 className="text-2xl font-bold text-gray-800">
+                Process Analysis & Insights
+              </h3>
             </div>
           </div>
 
@@ -820,7 +972,7 @@ const ConnectMachines = () => {
               <p className="text-gray-700 leading-relaxed mb-4">
                 {predictions.deviation_reason}
               </p>
-              
+
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-6">
                 {[
                   {
@@ -829,7 +981,7 @@ const ConnectMachines = () => {
                     icon: Settings,
                   },
                   {
-                    title: "Corrosion Resistance", 
+                    title: "Corrosion Resistance",
                     value: predictions.impact_analysis.corrosion_resistance,
                     icon: Shield,
                   },
@@ -841,10 +993,15 @@ const ConnectMachines = () => {
                 ].map((item, index) => {
                   const Icon = item.icon;
                   return (
-                    <div key={index} className="bg-white p-4 rounded-lg border border-gray-200">
+                    <div
+                      key={index}
+                      className="bg-white p-4 rounded-lg border border-gray-200"
+                    >
                       <div className="flex items-center space-x-2 mb-2">
                         <Icon className="w-4 h-4 text-emerald-600" />
-                        <h5 className="font-semibold text-gray-800 text-sm">{item.title}</h5>
+                        <h5 className="font-semibold text-gray-800 text-sm">
+                          {item.title}
+                        </h5>
                       </div>
                       <p className="text-sm text-gray-600">{item.value}</p>
                     </div>
@@ -862,7 +1019,9 @@ const ConnectMachines = () => {
               <div className="p-2 bg-emerald-100 rounded-lg">
                 <TrendingUp className="w-6 h-6 text-emerald-600" />
               </div>
-              <h3 className="text-2xl font-bold text-gray-800">AI System Summary</h3>
+              <h3 className="text-2xl font-bold text-gray-800">
+                AI System Summary
+              </h3>
             </div>
             <div className="bg-white p-6 rounded-xl border border-emerald-200 shadow-sm">
               <div className="flex items-start space-x-4">
@@ -870,7 +1029,9 @@ const ConnectMachines = () => {
                   <Layers className="w-5 h-5 text-emerald-600" />
                 </div>
                 <div className="flex-1">
-                  <p className="text-gray-700 leading-relaxed text-lg">{predictions.notes}</p>
+                  <p className="text-gray-700 leading-relaxed text-lg">
+                    {predictions.notes}
+                  </p>
                   <div className="mt-4 flex items-center space-x-4 text-sm text-gray-600">
                     <span className="flex items-center space-x-1">
                       <CheckCircle className="w-4 h-4 text-emerald-500" />
@@ -903,13 +1064,59 @@ const ConnectMachines = () => {
             Industrial Alloying ML System
           </h1>
           <p className="text-lg text-gray-600 max-w-2xl mx-auto">
-            Professional metallurgical process optimization platform with real-time OPC connectivity
+            Professional metallurgical process optimization platform with
+            real-time OPC connectivity
           </p>
         </div>
 
         {/* OPC Connection Panel */}
-        <div className="mb-8">
+        <div className="mb-4">
           <OPCConnectionPanel />
+        </div>
+
+        {/* Metal Grade Selector (below OPC card) - improved UI */}
+        <div className="mb-8 w-full">
+          <Card className="bg-gradient-to-r from-white via-emerald-50 to-emerald-50 border-emerald-200 shadow-lg">
+            <div className="flex items-center space-x-4 mb-4">
+              <div className="p-3 bg-emerald-100 rounded-lg">
+                <Beaker className="w-6 h-6 text-emerald-600" />
+              </div>
+              <div>
+                <h4 className="font-semibold text-gray-800 text-lg">
+                  Metal Grade
+                </h4>
+                <p className="text-sm text-gray-500">
+                  Select a metal grade to apply for the current batch.
+                </p>
+              </div>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-center">
+              <div className="md:col-span-2">
+                <Select
+                  placeholder="Select metal grade"
+                  loading={metalGradeLoading}
+                  value={selectedMetalGrade}
+                  onChange={(val) => setSelectedMetalGrade(val)}
+                  options={metalGrades.map((g) => ({ label: g, value: g }))}
+                  allowClear
+                  className="w-full"
+                  size="large"
+                />
+              </div>
+              <div className="flex items-center md:justify-end">
+                <Button
+                  type="default"
+                  onClick={() => {
+                    fetchMetalGrades();
+                    notification.success({ message: "Grades refreshed" });
+                  }}
+                  icon={<RefreshCw className="w-4 h-4" />}
+                >
+                  Refresh
+                </Button>
+              </div>
+            </div>
+          </Card>
         </div>
 
         {/* Enhanced Input Type Selection */}
@@ -918,7 +1125,9 @@ const ConnectMachines = () => {
             <div className="p-2 bg-emerald-100 rounded-lg">
               <Factory className="w-6 h-6 text-emerald-600" />
             </div>
-            <h2 className="text-2xl font-bold text-gray-800">Process Configuration</h2>
+            <h2 className="text-2xl font-bold text-gray-800">
+              Process Configuration
+            </h2>
           </div>
           <div className="grid grid-cols-3 gap-6">
             {inputTypes.map((type) => (
@@ -1106,7 +1315,11 @@ const ConnectMachines = () => {
                                 }
                                 className="border-2 border-gray-300 focus:border-emerald-500 rounded-xl"
                                 disabled={opcConnected}
-                                suffix={opcConnected ? <Eye className="w-4 h-4 text-emerald-500" /> : null}
+                                suffix={
+                                  opcConnected ? (
+                                    <Eye className="w-4 h-4 text-emerald-500" />
+                                  ) : null
+                                }
                               />
                             </div>
                           )
@@ -1115,7 +1328,8 @@ const ConnectMachines = () => {
                       {opcConnected && (
                         <p className="text-sm text-emerald-600 mt-2 flex items-center">
                           <Activity className="w-4 h-4 mr-2" />
-                          Temperature values are being updated automatically from OPC server
+                          Temperature values are being updated automatically
+                          from OPC server
                         </p>
                       )}
                     </div>
@@ -1239,15 +1453,27 @@ const ConnectMachines = () => {
             <Card className="bg-gradient-to-br from-emerald-50 to-emerald-100 border-emerald-200 shadow-xl">
               <div className="text-center p-4">
                 <div className="flex justify-center mb-3">
-                  <div className={`p-3 rounded-full ${opcConnected ? 'bg-emerald-100' : 'bg-gray-100'}`}>
-                    <Activity className={`w-8 h-8 ${opcConnected ? 'text-emerald-600' : 'text-gray-500'}`} />
+                  <div
+                    className={`p-3 rounded-full ${
+                      opcConnected ? "bg-emerald-100" : "bg-gray-100"
+                    }`}
+                  >
+                    <Activity
+                      className={`w-8 h-8 ${
+                        opcConnected ? "text-emerald-600" : "text-gray-500"
+                      }`}
+                    />
                   </div>
                 </div>
-                <h3 className="font-bold text-gray-800 mb-3 text-lg">System Status</h3>
+                <h3 className="font-bold text-gray-800 mb-3 text-lg">
+                  System Status
+                </h3>
                 <Badge
                   status={opcConnected ? "processing" : "default"}
                   text={opcConnected ? "Connected & Ready" : "Disconnected"}
-                  className={`text-lg ${opcConnected ? 'text-emerald-600' : 'text-gray-500'}`}
+                  className={`text-lg ${
+                    opcConnected ? "text-emerald-600" : "text-gray-500"
+                  }`}
                 />
                 <div className="mt-4 space-y-2 text-sm text-gray-600">
                   <div className="flex justify-between">
@@ -1258,12 +1484,18 @@ const ConnectMachines = () => {
                   </div>
                   <div className="flex justify-between">
                     <span>Batch ID:</span>
-                    <span className="font-semibold font-mono">{formData.batchId}</span>
+                    <span className="font-semibold font-mono">
+                      {formData.batchId}
+                    </span>
                   </div>
                   <div className="flex justify-between">
                     <span>OPC Status:</span>
-                    <span className={`font-semibold ${opcConnected ? 'text-emerald-600' : 'text-gray-500'}`}>
-                      {opcConnected ? 'Connected' : 'Disconnected'}
+                    <span
+                      className={`font-semibold ${
+                        opcConnected ? "text-emerald-600" : "text-gray-500"
+                      }`}
+                    >
+                      {opcConnected ? "Connected" : "Disconnected"}
                     </span>
                   </div>
                 </div>
@@ -1291,7 +1523,7 @@ const ConnectMachines = () => {
                   </div>
                 </div>
               </div>
-              
+
               <div className="p-8">
                 <PredictionPanel />
               </div>

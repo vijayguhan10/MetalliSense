@@ -122,6 +122,7 @@ const ConnectMachines = () => {
     target_cu: "",
     target_si: "",
     target_fe: "",
+    total_weight: "",
   });
 
   const [predictions, setPredictions] = useState(null);
@@ -1188,6 +1189,24 @@ const ConnectMachines = () => {
                             setFormData({
                               ...formData,
                               timestamp: e.target.value,
+                            })
+                          }
+                          className="border-2 border-gray-300 focus:border-emerald-500 rounded-xl"
+                        />
+                      </div>
+                      <div className="md:col-span-2">
+                        <label className="block text-sm font-bold text-gray-700 mb-3">
+                          Total Batch Weight (kg)
+                        </label>
+                        <Input
+                          size="large"
+                          type="number"
+                          placeholder="e.g. 1000"
+                          value={formData.total_weight}
+                          onChange={(e) =>
+                            setFormData({
+                              ...formData,
+                              total_weight: e.target.value,
                             })
                           }
                           className="border-2 border-gray-300 focus:border-emerald-500 rounded-xl"

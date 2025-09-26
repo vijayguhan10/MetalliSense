@@ -19,42 +19,38 @@ import {
   Thermometer,
   Zap,
   RotateCcw,
-  TrendingUp,
-  AlertTriangle,
-  CheckCircle,
-  Activity,
-  Settings,
-  BarChart3,
-  Gauge,
-  Timer,
+  Cpu,
+  Shield,
+  Beaker,
   Factory,
+  RefreshCw,
   Wifi,
   WifiOff,
   Server,
-  Monitor,
-  Play,
-  Pause,
-  RefreshCw,
-  AlertCircle,
-  Database,
-  Cable,
-  Power,
-  Eye,
-  ChevronRight,
-  Globe,
-  Award,
+  Activity,
   Target,
+  TrendingUp,
+  Flame,
+  Wrench,
+  Award,
   Layers,
-  Beaker,
+  CheckCircle,
   ArrowUp,
   ArrowDown,
   TrendingDown,
+  Gauge,
+  Timer,
+  Globe,
+  Power,
+  Cable,
+  Eye,
+  AlertTriangle,
+  AlertCircle,
+  Settings,
   Clock,
-  Flame,
-  Wrench,
-  Cpu,
-  Shield,
 } from "lucide-react";
+
+// ...react
 
 const { Option } = Select;
 const { TabPane } = Tabs;
@@ -108,7 +104,18 @@ const ConnectMachines = () => {
     al_raw: "",
     cu_raw: "",
     si_raw: "",
+    fe_raw: "",
+    c_raw: "",
+    mn_raw: "",
+    p_raw: "",
+    s_raw: "",
+    cr_raw: "",
+    ni_raw: "",
+    mo_raw: "",
+    v_raw: "",
+    nb_raw: "",
     scrap_added_kg: "",
+    raw_metal_weight: "",
     scrap_al: "",
     scrap_cu: "",
     scrap_si: "",
@@ -131,6 +138,11 @@ const ConnectMachines = () => {
   const [metalGrades, setMetalGrades] = useState([]);
   const [metalGradeLoading, setMetalGradeLoading] = useState(false);
   const [selectedMetalGrade, setSelectedMetalGrade] = useState(null);
+  const [metalElements, setMetalElements] = useState([]);
+  const [metalElementsLoading, setMetalElementsLoading] = useState(false);
+  const [syntheticLoading, setSyntheticLoading] = useState(false);
+  const [syntheticScrapLoading, setSyntheticScrapLoading] = useState(false);
+  const [syntheticMixedLoading, setSyntheticMixedLoading] = useState(false);
 
   const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:3000";
 
@@ -265,65 +277,192 @@ const ConnectMachines = () => {
     fetchMetalGrades();
   }, []);
 
-  const startDataCollection = () => {
-    const interval = setInterval(() => {
-      setMachines((prev) =>
-        prev.map((machine) => {
-          if (machine.status === "connected") {
-            let newData = { ...machine.data };
+  // Fetch element symbols for the selected metal grade
+  const fetchElementsForGrade = async (gradeName) => {
+    if (!gradeName) return setMetalElements([]);
+    setMetalElementsLoading(true);
+    try {
+      const res = await api.post("/api/v1/metal-grades/elements", {
+        name: gradeName,
+      });
+      const body = res.data || {};
+      // Response shape expected: { status: 'success', data: { metalGrade: 'ADI-1100-7', elements: ['Fe','C', ...] } }
+      let elements = [];
+      if (body.data && Array.isArray(body.data.elements))
+        elements = body.data.elements;
+      else if (Array.isArray(body.elements)) elements = body.elements;
+      // normalize: ensure elements are strings and trim whitespace
+      elements = elements.filter(Boolean).map((e) => String(e).trim());
 
-            switch (machine.type) {
-              case "temperature":
-                newData = {
-                  zone1: 1240 + Math.random() * 20,
-                  zone2: 1255 + Math.random() * 15,
-                  zone3: 1275 + Math.random() * 10,
-                };
-                setFormData((prev) => ({
-                  ...prev,
-                  zone1_temp: newData.zone1.toFixed(0),
-                  zone2_temp: newData.zone2.toFixed(0),
-                  zone3_temp: newData.zone3.toFixed(0),
-                }));
-                break;
-              case "stirrer":
-                newData = {
-                  rpm: 145 + Math.random() * 10,
-                  time: 28 + Math.random() * 4,
-                };
-                break;
-              case "material":
-                newData = {
-                  al: Math.random() * 100,
-                  cu: Math.random() * 50,
-                  si: Math.random() * 30,
-                };
-                break;
-              case "analyzer":
-                newData = {
-                  al_pct: 85 + Math.random() * 10,
-                  cu_pct: 8 + Math.random() * 4,
-                  si_pct: 5 + Math.random() * 2,
-                  fe_pct: 2 + Math.random() * 1,
-                };
-                break;
-            }
-
-            return {
-              ...machine,
-              data: newData,
-              lastSeen: new Date().toISOString(),
-            };
-          }
-          return machine;
-        })
+      // Prepare allowed keys for current elements
+      const allowedRawKeys = elements.map(
+        (el) => `${String(el).toLowerCase()}_raw`
       );
-    }, 2000);
+      const allowedScrapKeys = elements.map(
+        (el) => `scrap_${String(el).toLowerCase()}`
+      );
 
-    return () => clearInterval(interval);
+      // Rebuild formData: remove any previous element-specific keys not in the allowed lists,
+      // and ensure allowed keys exist (initialized to empty string).
+      setFormData((prev) => {
+        const next = { ...prev };
+
+        // remove stale raw keys
+        Object.keys(next).forEach((k) => {
+          if (k.endsWith("_raw") && !allowedRawKeys.includes(k)) {
+            delete next[k];
+          }
+          if (k.startsWith("scrap_") && !allowedScrapKeys.includes(k)) {
+            delete next[k];
+          }
+        });
+
+        // ensure allowed keys exist
+        allowedRawKeys.forEach((k) => {
+          if (next[k] === undefined) next[k] = "";
+        });
+        allowedScrapKeys.forEach((k) => {
+          if (next[k] === undefined) next[k] = "";
+        });
+
+        return next;
+      });
+
+      setMetalElements(elements);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn("Could not fetch elements for grade", gradeName, e);
+      setMetalElements([]);
+    } finally {
+      setMetalElementsLoading(false);
+    }
   };
 
-  const generatePredictions = () => {
+  // When selected metal grade changes, fetch its elements
+  useEffect(() => {
+    if (selectedMetalGrade) fetchElementsForGrade(selectedMetalGrade);
+    else setMetalElements([]);
+  }, [selectedMetalGrade]);
+
+  // Generate synthetic spectrometer reading for Metal Alone
+  const generateSyntheticReading = async () => {
+    if (!selectedMetalGrade) {
+      notification.warning({ message: "Select a metal grade first" });
+      return;
+    }
+
+    setSyntheticLoading(true);
+    try {
+      const res = await api.post("/api/v1/spectrometer/metal-alone", {
+        metalGrade: selectedMetalGrade,
+      });
+      const body = res.data || {};
+      const opcData = body.data?.opcData || body.opcData || {};
+      const composition = opcData.composition || {};
+
+      // Only update formData fields for elements currently displayed (metalElements)
+      const availableLower = (metalElements || []).map((e) =>
+        String(e).toLowerCase()
+      );
+
+      setFormData((prev) => {
+        const next = { ...prev };
+        Object.keys(composition).forEach((el) => {
+          const key = `${String(el).toLowerCase()}_raw`;
+          if (availableLower.includes(String(el).toLowerCase())) {
+            // write numeric value (format to 3 decimals)
+            next[key] = Number(composition[el]).toFixed(3);
+          }
+        });
+        // update a temperature field if present
+        if (opcData.temperature !== undefined) {
+          next.zone1_temp = String(opcData.temperature);
+        }
+        // update timestamp if available
+        if (opcData.timestamp) next.timestamp = opcData.timestamp.slice(0, 16);
+        return next;
+      });
+
+      notification.success({ message: "Synthetic reading applied" });
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error("Synthetic reading failed", e);
+      notification.error({ message: "Failed to generate synthetic reading" });
+    } finally {
+      setSyntheticLoading(false);
+    }
+  };
+
+  // Generate synthetic spectrometer reading for Scrap Alone (updates scrap_<el> fields)
+  const generateSyntheticScrapReading = async () => {
+    if (!selectedMetalGrade) {
+      notification.warning({ message: "Select a metal grade first" });
+      return;
+    }
+
+    setSyntheticScrapLoading(true);
+    try {
+      const res = await api.post("/api/v1/spectrometer/metal-alone", {
+        metalGrade: selectedMetalGrade,
+      });
+      const body = res.data || {};
+      const opcData = body.data?.opcData || body.opcData || {};
+      const composition = opcData.composition || {};
+
+      const availableLower = (metalElements || []).map((e) =>
+        String(e).toLowerCase()
+      );
+
+      setFormData((prev) => {
+        const next = { ...prev };
+        Object.keys(composition).forEach((el) => {
+          const scrapKey = `scrap_${String(el).toLowerCase()}`;
+          if (availableLower.includes(String(el).toLowerCase())) {
+            next[scrapKey] = Number(composition[el]).toFixed(3);
+          }
+        });
+        return next;
+      });
+
+      notification.success({ message: "Synthetic scrap reading applied" });
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error("Synthetic scrap reading failed", e);
+      notification.error({
+        message: "Failed to generate synthetic scrap reading",
+      });
+    } finally {
+      setSyntheticScrapLoading(false);
+    }
+  };
+
+  // Generate synthetic reading for Scrap + Metal (mixed)
+  // Current behavior: call the metal-alone and scrap-alone handlers sequentially
+  // so that both raw and scrap element fields are populated by existing logic.
+  const generateSyntheticMixedReading = async () => {
+    if (!selectedMetalGrade) {
+      notification.warning({ message: "Select a metal grade first" });
+      return;
+    }
+
+    setSyntheticMixedLoading(true);
+    try {
+      await generateSyntheticReading();
+      // ensure the first update has time to settle before invoking the second
+      await generateSyntheticScrapReading();
+      notification.success({ message: "Synthetic mixed reading applied" });
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error("Synthetic mixed reading failed", e);
+      notification.error({
+        message: "Failed to generate synthetic mixed reading",
+      });
+    } finally {
+      setSyntheticMixedLoading(false);
+    }
+  };
+
+  const generatePredictions = async () => {
     if (!opcConnected) {
       notification.warning({
         message: "OPC Connection Required",
@@ -335,60 +474,33 @@ const ConnectMachines = () => {
     }
 
     setIsProcessing(true);
-    setTimeout(() => {
-      setPredictions({
-        additions: {
-          al_add_kg: Math.random() * 50 + 10,
-          cu_add_kg: Math.random() * 30 + 5,
-          si_add_kg: Math.random() * 20 + 2,
-        },
-        iterations_saved: Math.floor(Math.random() * 5) + 3,
-        energy_saving: Math.floor(Math.random() * 25) + 15,
-        composition_accuracy: Math.floor(Math.random() * 10) + 90,
-        cost_savings: Math.floor(Math.random() * 5000) + 2000,
-        processing_time_reduction: Math.floor(Math.random() * 30) + 15,
-        quality_improvement: Math.floor(Math.random() * 15) + 8,
-        deviation_reason:
-          "Cu content slightly higher due to scrap composition variance",
-        optimization_confidence: Math.floor(Math.random() * 10) + 90,
-        environmental_impact: {
-          co2_reduction: Math.random() * 15 + 5,
-          waste_reduction: Math.random() * 20 + 10,
-          water_savings: Math.random() * 500 + 200,
-        },
-        process_recommendations: [
-          {
-            title: "Temperature Optimization",
-            description:
-              "Reduce Zone 2 temperature by 5°C for better energy efficiency",
-            priority: "High",
-            estimated_savings: "$1,200",
-          },
-          {
-            title: "Stirring Duration",
-            description:
-              "Increase stirring time by 2 minutes for better homogeneity",
-            priority: "Medium",
-            estimated_savings: "$800",
-          },
-          {
-            title: "Material Sequencing",
-            description:
-              "Add copper before silicon for optimal alloy formation",
-            priority: "High",
-            estimated_savings: "$950",
-          },
-        ],
-        impact_analysis: {
-          mechanical_properties: "Tensile strength +2.3%",
-          corrosion_resistance: "Standard performance maintained",
-          production_delay: "No delays expected",
-        },
-        notes:
-          "Optimal mixing parameters achieved. Consider reducing Zone 2 temperature by 5°C for better energy efficiency.",
-      });
+    try {
+      const totalWeight = Number(formData.total_weight) || 0;
+      const scrapWeight = Number(formData.scrap_added_kg) || 0;
+      const rawWeight = totalWeight - scrapWeight;
+
+      const payload = {
+        metalGrade: selectedMetalGrade,
+        totalWeight,
+        rawWeight,
+        scrapWeight,
+        formData,
+      };
+
+      // call backend prediction endpoint (best-effort; backend may vary)
+      const res = await api
+        .post("/api/v1/predictions", payload)
+        .catch(() => null);
+      const body = res?.data ?? { message: "No prediction returned" };
+      setPredictions(body);
+      notification.success({ message: "Predictions generated" });
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error("Prediction generation failed", e);
+      notification.error({ message: "Failed to generate predictions" });
+    } finally {
       setIsProcessing(false);
-    }, 2000);
+    }
   };
 
   const inputTypes = [
@@ -432,6 +544,14 @@ const ConnectMachines = () => {
       default:
         return <WifiOff className="w-4 h-4 text-gray-400" />;
     }
+  };
+
+  // Format element symbol labels: 'fe' -> 'Fe', 'c' -> 'C'
+  const formatElementSymbol = (raw) => {
+    if (!raw) return "";
+    const s = String(raw).replace(/_/g, "").toLowerCase();
+    if (s.length === 1) return s.toUpperCase();
+    return s.charAt(0).toUpperCase() + s.slice(1);
   };
 
   const FurnaceZoneVisualization = () => (
@@ -494,6 +614,7 @@ const ConnectMachines = () => {
                 </div>
                 <div className="absolute inset-0 bg-gradient-to-r from-white/10 to-transparent rounded-2xl animate-pulse"></div>
               </div>
+              {/* debug viewer removed */}
             </Tooltip>
           );
         })}
@@ -1221,87 +1342,132 @@ const ConnectMachines = () => {
                     {(inputType === "metal-alone" ||
                       inputType === "scrap-metal") && (
                       <div>
-                        <h4 className="font-bold text-gray-800 mb-4 flex items-center text-lg">
-                          <span className="w-4 h-4 bg-emerald-500 rounded-full mr-3"></span>
-                          Raw Metal Inputs (kg)
-                        </h4>
-                        <div className="grid grid-cols-3 gap-6">
-                          {["al_raw", "cu_raw", "si_raw"].map((metal) => (
-                            <div key={metal}>
-                              <label className="block text-sm font-bold text-gray-700 mb-2">
-                                {metal.replace("_raw", "").toUpperCase()}
-                              </label>
-                              <Input
-                                size="large"
-                                type="number"
-                                placeholder="0.00"
-                                value={formData[metal]}
-                                onChange={(e) =>
-                                  setFormData({
-                                    ...formData,
-                                    [metal]: e.target.value,
-                                  })
-                                }
-                                className="border-2 border-gray-300 focus:border-emerald-500 rounded-xl"
-                              />
-                            </div>
-                          ))}
+                        <div className="flex items-center justify-between mb-4">
+                          <h4 className="font-bold text-gray-800 flex items-center text-lg">
+                            <span className="w-4 h-4 bg-emerald-500 rounded-full mr-3"></span>
+                            Raw Metal Inputs (kg)
+                          </h4>
+                          <div className="flex items-center space-x-2">
+                            {inputType === "metal-alone" && (
+                              <Button
+                                type="default"
+                                loading={syntheticLoading}
+                                onClick={generateSyntheticReading}
+                                className="text-sm"
+                              >
+                                Generate Synthetic Reading
+                              </Button>
+                            )}
+                            {inputType === "scrap-metal" && (
+                              <Button
+                                type="default"
+                                loading={syntheticMixedLoading}
+                                onClick={generateSyntheticMixedReading}
+                                className="text-sm"
+                              >
+                                Generate Synthetic Mixed Reading
+                              </Button>
+                            )}
+                          </div>
                         </div>
+                        {/* Raw Metal Total Weight input removed per request */}
+                        {metalElementsLoading ? (
+                          <div className="text-sm text-gray-500">
+                            Loading elements...
+                          </div>
+                        ) : metalElements && metalElements.length > 0 ? (
+                          <div className="grid grid-cols-3 gap-6">
+                            {metalElements.map((el) => {
+                              const key = `${String(el).toLowerCase()}_raw`;
+                              return (
+                                <div key={key}>
+                                  <label className="block text-sm font-bold text-gray-700 mb-2">
+                                    {formatElementSymbol(String(el))}
+                                  </label>
+                                  <Input
+                                    size="large"
+                                    type="number"
+                                    placeholder="0.00"
+                                    value={formData[key]}
+                                    onChange={(e) =>
+                                      setFormData({
+                                        ...formData,
+                                        [key]: e.target.value,
+                                      })
+                                    }
+                                    className="border-2 border-gray-300 focus:border-emerald-500 rounded-xl"
+                                  />
+                                </div>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <div className="text-sm text-gray-500">
+                            Select a metal grade to load element inputs.
+                          </div>
+                        )}
                       </div>
                     )}
 
                     {(inputType === "scrap-alone" ||
                       inputType === "scrap-metal") && (
                       <div>
-                        <h4 className="font-bold text-gray-800 mb-4 flex items-center text-lg">
-                          <span className="w-4 h-4 bg-gray-500 rounded-full mr-3"></span>
-                          Scrap Material Input
-                        </h4>
-                        <div className="grid grid-cols-2 gap-6 mb-6">
+                        <div className="flex items-center justify-between mb-4">
+                          <h4 className="font-bold text-gray-800 flex items-center text-lg">
+                            <span className="w-4 h-4 bg-gray-500 rounded-full mr-3"></span>
+                            Scrap Material Input
+                          </h4>
                           <div>
-                            <label className="block text-sm font-bold text-gray-700 mb-2">
-                              Total Scrap Weight (kg)
-                            </label>
-                            <Input
-                              size="large"
-                              type="number"
-                              placeholder="0.00"
-                              value={formData.scrap_added_kg}
-                              onChange={(e) =>
-                                setFormData({
-                                  ...formData,
-                                  scrap_added_kg: e.target.value,
-                                })
-                              }
-                              className="border-2 border-gray-300 focus:border-emerald-500 rounded-xl"
-                            />
+                            {inputType === "scrap-alone" && (
+                              <Button
+                                type="default"
+                                loading={syntheticScrapLoading}
+                                onClick={generateSyntheticScrapReading}
+                                className="text-sm"
+                              >
+                                Generate Synthetic Scrap Reading
+                              </Button>
+                            )}
                           </div>
                         </div>
-                        <div className="grid grid-cols-4 gap-4">
-                          {["scrap_al", "scrap_cu", "scrap_si", "scrap_fe"].map(
-                            (comp) => (
-                              <div key={comp}>
-                                <label className="block text-sm font-bold text-gray-700 mb-2">
-                                  {comp.replace("scrap_", "").toUpperCase()} (%)
-                                </label>
-                                <Input
-                                  size="large"
-                                  type="number"
-                                  placeholder="0.0"
-                                  max="100"
-                                  value={formData[comp]}
-                                  onChange={(e) =>
-                                    setFormData({
-                                      ...formData,
-                                      [comp]: e.target.value,
-                                    })
-                                  }
-                                  className="border-2 border-gray-300 focus:border-emerald-500 rounded-xl"
-                                />
-                              </div>
-                            )
-                          )}
-                        </div>
+                        {/* Total Scrap and Raw Metal Weight inputs shown only for scrap-metal */}
+                        {/* Total Scrap Weight input removed per request */}
+                        {metalElementsLoading ? (
+                          <div className="text-sm text-gray-500">
+                            Loading elements...
+                          </div>
+                        ) : metalElements && metalElements.length > 0 ? (
+                          <div className="grid grid-cols-4 gap-4">
+                            {metalElements.map((el) => {
+                              const key = `scrap_${String(el).toLowerCase()}`;
+                              return (
+                                <div key={key}>
+                                  <label className="block text-sm font-bold text-gray-700 mb-2">
+                                    {formatElementSymbol(el)} (%)
+                                  </label>
+                                  <Input
+                                    size="large"
+                                    type="number"
+                                    placeholder="0.0"
+                                    max="100"
+                                    value={formData[key]}
+                                    onChange={(e) =>
+                                      setFormData({
+                                        ...formData,
+                                        [key]: e.target.value,
+                                      })
+                                    }
+                                    className="border-2 border-gray-300 focus:border-emerald-500 rounded-xl"
+                                  />
+                                </div>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <div className="text-sm text-gray-500">
+                            Select a metal grade to load scrap element inputs.
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>

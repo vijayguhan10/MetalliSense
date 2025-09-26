@@ -125,10 +125,7 @@ const ConnectMachines = () => {
     zone3_temp: "",
     stirrer_rpm: 150,
     stirrer_time: 30,
-    target_al: "",
-    target_cu: "",
-    target_si: "",
-    target_fe: "",
+    // target composition removed — values are generated/simulated instead of user input
     total_weight: "",
   });
 
@@ -226,7 +223,8 @@ const ConnectMachines = () => {
     let cancelled = false;
     let timerId = null;
 
-    const POLL_INTERVAL_MS = 2000;
+    // Poll every 10 seconds to reduce backend load
+    const POLL_INTERVAL_MS = 10000;
 
     const poll = async () => {
       // call the status endpoint and update state
@@ -276,6 +274,23 @@ const ConnectMachines = () => {
   useEffect(() => {
     fetchMetalGrades();
   }, []);
+
+  // When OPC server is not connected, generate furnace zone temperatures once on mount
+  // (no continuous updates) to provide reasonable default values for the UI.
+  useEffect(() => {
+    if (!opcConnected) {
+      const base = [1245, 1260, 1280];
+      const next = { ...formData };
+      base.forEach((b, i) => {
+        const drift = (Math.random() - 0.5) * 16; // +/- ~8 degrees
+        const temp = Math.round(b + drift);
+        next[`zone${i + 1}_temp`] = String(temp);
+      });
+      setFormData(next);
+    }
+    // run on mount and when opcConnected changes
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [opcConnected]);
 
   // Fetch element symbols for the selected metal grade
   const fetchElementsForGrade = async (gradeName) => {
@@ -1564,40 +1579,7 @@ const ConnectMachines = () => {
                       </div>
                     </div>
 
-                    <div>
-                      <h4 className="font-bold text-gray-800 mb-4 flex items-center text-lg">
-                        <span className="w-4 h-4 bg-gray-500 rounded-full mr-3"></span>
-                        Target Composition (%)
-                      </h4>
-                      <div className="grid grid-cols-4 gap-4">
-                        {[
-                          "target_al",
-                          "target_cu",
-                          "target_si",
-                          "target_fe",
-                        ].map((target) => (
-                          <div key={target}>
-                            <label className="block text-sm font-bold text-gray-700 mb-2">
-                              {target.replace("target_", "").toUpperCase()}
-                            </label>
-                            <Input
-                              size="large"
-                              type="number"
-                              placeholder="0.0"
-                              max="100"
-                              value={formData[target]}
-                              onChange={(e) =>
-                                setFormData({
-                                  ...formData,
-                                  [target]: e.target.value,
-                                })
-                              }
-                              className="border-2 border-gray-300 focus:border-emerald-500 rounded-xl"
-                            />
-                          </div>
-                        ))}
-                      </div>
-                    </div>
+                    {/* Target Composition removed: values are not user-editable */}
                   </div>
                 </TabPane>
               </Tabs>

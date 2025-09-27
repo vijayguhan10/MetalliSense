@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import axios from "axios";
 import {
   Card,
@@ -477,12 +477,15 @@ const ConnectMachines = () => {
     }
   };
 
+  // synthetic alloy recommendation caching
+  const baseAlloysRef = useRef(null); // holds initial random alloy set
+  const clickCountRef = useRef(0);
+
   const generatePredictions = async () => {
     if (!opcConnected) {
       notification.warning({
         message: "OPC Connection Required",
-        description:
-          "Please establish OPC connection before generating predictions",
+        description: "Please connect OPC before generating predictions",
         placement: "topRight",
       });
       return;
@@ -490,29 +493,140 @@ const ConnectMachines = () => {
 
     setIsProcessing(true);
     try {
-      const totalWeight = Number(formData.total_weight) || 0;
-      const scrapWeight = Number(formData.scrap_added_kg) || 0;
-      const rawWeight = totalWeight - scrapWeight;
+      // Build payload for local model endpoint
+      const timestamp = new Date().toISOString();
+      const batchIdNum =
+        Number(String(formData.batchId).replace(/\D/g, "").slice(-6)) ||
+        Date.now();
+      const spectrometer = {};
+      const metalKeys = Object.keys(formData).filter((k) => k.endsWith("_raw"));
+      metalKeys.forEach((k) => {
+        const el = k.replace(/_raw$/, "").toUpperCase();
+        const val = Number(formData[k]);
+        if (!Number.isNaN(val) && val !== "") spectrometer[el] = val;
+      });
+
+      // Apply backend constraints:
+      // batch_id <= 10000, stirrer.torque >= 20, stirrer.time_min <= 20,
+      // load_cell.batch_weight_kg <= 5000, historical_data.average_energy_consumption_kwh >= 100
+      const constrainedBatchId = Math.min(batchIdNum, 10000);
+      const rawTorque = 0; // not collected yet; set to minimum required
+      const torque = Math.max(rawTorque, 20);
+      const timeMin = Math.min(Number(formData.stirrer_time) || 0, 20);
+      const batchWeight = Math.min(Number(formData.total_weight) || 0, 5000);
+      const avgEnergy = Math.max(100, 0); // baseline placeholder until real data available
+
+      // If we have a selectedMetalGrade, fetch its full data to compute mean composition for target_composition
+      let targetComposition = {};
+      try {
+        if (selectedMetalGrade) {
+          const gradeResp = await api.post("/api/v1/metal-grades/by-name", {
+            name: selectedMetalGrade,
+          });
+          const mg = gradeResp.data?.data?.metalGrade;
+          const range = mg?.composition_range || {};
+          Object.entries(range).forEach(([el, arr]) => {
+            if (Array.isArray(arr) && arr.length === 2) {
+              const mean = (Number(arr[0]) + Number(arr[1])) / 2;
+              if (!Number.isNaN(mean))
+                targetComposition[el] = Number(mean.toFixed(4));
+            }
+          });
+        }
+      } catch (gradeErr) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          "Failed to fetch grade for target composition means",
+          gradeErr
+        );
+        targetComposition = {};
+      }
 
       const payload = {
-        metalGrade: selectedMetalGrade,
-        totalWeight,
-        rawWeight,
-        scrapWeight,
-        formData,
+        timestamp,
+        batch_id: constrainedBatchId,
+        alloy_type: "steel", // forced per requirement
+        spectrometer,
+        furnace_temp: {
+          zone1: Number(formData.zone1_temp) || null,
+          zone2: Number(formData.zone2_temp) || null,
+          zone3: Number(formData.zone3_temp) || null,
+        },
+        dosing: {
+          Al_added: Number(formData.al_raw) || 0,
+          Cu_added: Number(formData.cu_raw) || 0,
+          Si_added: Number(formData.si_raw) || 0,
+        },
+        stirrer: {
+          rpm: Number(formData.stirrer_rpm) || 0,
+          torque,
+          time_min: timeMin,
+        },
+        load_cell: {
+          batch_weight_kg: batchWeight,
+        },
+        gas_flow: {
+          O2_percent: 0.1,
+          flow_L_per_min: 5.0,
+        },
+        target_composition: targetComposition,
+        historical_data: {
+          previous_iterations: 0,
+          average_energy_consumption_kwh: avgEnergy,
+        },
       };
 
-      // call backend prediction endpoint (best-effort; backend may vary)
-      const res = await api
-        .post("/api/v1/predictions", payload)
-        .catch(() => null);
-      const body = res?.data ?? { message: "No prediction returned" };
-      setPredictions(body);
-      notification.success({ message: "Predictions generated" });
+      console.log(payload);
+
+      let respJson = null;
+      try {
+        // Axios POST to local optimization service
+        const axiosResp = await axios.post(
+          "http://localhost:8001/optimize",
+          payload,
+          {
+            headers: { "Content-Type": "application/json" },
+            timeout: 15000,
+            validateStatus: (s) => s >= 200 && s < 300,
+          }
+        );
+        console.log(axiosResp);
+        respJson = axiosResp.data;
+        respJson._model_payload = payload;
+        respJson.synthetic = false;
+        setPredictions(respJson);
+        notification.success({ message: "Local model recommendations ready" });
+      } catch (err) {
+        // fallback to previous synthetic behavior if local model unavailable
+        clickCountRef.current += 1;
+        if (!baseAlloysRef.current) {
+          const fallbackAlloys = ["FeSi", "FeMn", "FeCr", "Cu"].map((a, i) => ({
+            alloy: a,
+            kg: Number((i + 1.5).toFixed(3)),
+            targets: [],
+            rationale_code: "FALLBACK",
+          }));
+          baseAlloysRef.current = fallbackAlloys;
+        }
+        const synthetic = {
+          status: "ok",
+          batch_id: batchIdNum,
+          additions: baseAlloysRef.current,
+          notes: {},
+          server_timestamp: new Date().toISOString(),
+          synthetic: true,
+          error: String(err.message || err),
+        };
+        setPredictions(synthetic);
+        notification.warning({
+          message: "Local model unavailable - fallback used",
+          description: err.message,
+        });
+      }
     } catch (e) {
       // eslint-disable-next-line no-console
-      console.error("Prediction generation failed", e);
-      notification.error({ message: "Failed to generate predictions" });
+      console.error("Synthetic prediction generation failed", e);
+      notification.error({ message: "Failed to build synthetic predictions" });
     } finally {
       setIsProcessing(false);
     }
@@ -736,96 +850,8 @@ const ConnectMachines = () => {
 
   const PredictionPanel = () => {
     if (!predictions) return null;
-
     return (
-      <div className="space-y-8">
-        {/* Hero Metrics Section */}
-        <div className="bg-gradient-to-br from-emerald-50 to-gray-50 rounded-3xl p-8 border border-emerald-200 shadow-2xl">
-          <div className="text-center mb-8">
-            <div className="inline-flex items-center justify-center w-16 h-16 bg-gradient-to-br from-emerald-500 to-emerald-600 rounded-2xl shadow-lg mb-4">
-              <Award className="w-8 h-8 text-white" />
-            </div>
-            <h2 className="text-3xl font-bold text-gray-800 mb-2">
-              ML Optimization Results
-            </h2>
-            <p className="text-gray-600 text-lg">
-              AI-powered metallurgical process enhancement
-            </p>
-          </div>
-
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
-            <div className="text-center">
-              <div className="w-20 h-20 mx-auto bg-white rounded-2xl shadow-lg flex items-center justify-center mb-3">
-                <Gauge className="w-8 h-8 text-emerald-600" />
-              </div>
-              <div className="text-3xl font-bold text-gray-800 mb-1">
-                {predictions.composition_accuracy}%
-              </div>
-              <div className="text-sm text-gray-600 font-medium">Accuracy</div>
-              <div className="flex items-center justify-center mt-1">
-                <ArrowUp className="w-3 h-3 text-emerald-500 mr-1" />
-                <span className="text-xs text-emerald-600">+5.2%</span>
-              </div>
-            </div>
-
-            <div className="text-center">
-              <div className="w-20 h-20 mx-auto bg-white rounded-2xl shadow-lg flex items-center justify-center mb-3">
-                <Timer className="w-8 h-8 text-emerald-600" />
-              </div>
-              <div className="text-3xl font-bold text-gray-800 mb-1">
-                {predictions.iterations_saved}
-              </div>
-              <div className="text-sm text-gray-600 font-medium">
-                Iterations Saved
-              </div>
-              <div className="flex items-center justify-center mt-1">
-                <TrendingDown className="w-3 h-3 text-emerald-500 mr-1" />
-                <span className="text-xs text-emerald-600">
-                  -{predictions.processing_time_reduction}%
-                </span>
-              </div>
-            </div>
-
-            <div className="text-center">
-              <div className="w-20 h-20 mx-auto bg-white rounded-2xl shadow-lg flex items-center justify-center mb-3">
-                <Zap className="w-8 h-8 text-emerald-600" />
-              </div>
-              <div className="text-3xl font-bold text-gray-800 mb-1">
-                {predictions.energy_saving}%
-              </div>
-              <div className="text-sm text-gray-600 font-medium">
-                Energy Saved
-              </div>
-              <div className="flex items-center justify-center mt-1">
-                <ArrowDown className="w-3 h-3 text-emerald-500 mr-1" />
-                <span className="text-xs text-emerald-600">
-                  -{predictions.environmental_impact.co2_reduction.toFixed(1)}t
-                  CO₂
-                </span>
-              </div>
-            </div>
-
-            <div className="text-center">
-              <div className="w-20 h-20 mx-auto bg-white rounded-2xl shadow-lg flex items-center justify-center mb-3">
-                <TrendingUp className="w-8 h-8 text-emerald-600" />
-              </div>
-              <div className="text-3xl font-bold text-gray-800 mb-1">
-                ${(predictions.cost_savings / 1000).toFixed(1)}K
-              </div>
-              <div className="text-sm text-gray-600 font-medium">
-                Cost Savings
-              </div>
-              <div className="flex items-center justify-center mt-1">
-                <ArrowUp className="w-3 h-3 text-emerald-500 mr-1" />
-                <span className="text-xs text-emerald-600">
-                  +{predictions.quality_improvement}% quality
-                </span>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Predicted Additions - Enhanced */}
+      <div>
         <Card className="bg-white border-gray-200 shadow-xl rounded-2xl overflow-hidden">
           <div className="bg-gradient-to-r from-gray-50 to-emerald-50 p-6 border-b border-gray-200">
             <div className="flex items-center justify-between">
@@ -852,339 +878,37 @@ const ConnectMachines = () => {
 
           <div className="p-6">
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-              {[
-                {
-                  metal: "Aluminum",
-                  symbol: "Al",
-                  value: predictions.additions.al_add_kg,
-                  unit: "kg",
-                  color: "from-gray-100 to-gray-200",
-                  borderColor: "border-gray-300",
-                  textColor: "text-gray-700",
-                  iconBg: "bg-gray-100",
-                  progress: 85,
-                },
-                {
-                  metal: "Copper",
-                  symbol: "Cu",
-                  value: predictions.additions.cu_add_kg,
-                  unit: "kg",
-                  color: "from-emerald-100 to-emerald-200",
-                  borderColor: "border-emerald-300",
-                  textColor: "text-emerald-700",
-                  iconBg: "bg-emerald-100",
-                  progress: 92,
-                },
-                {
-                  metal: "Silicon",
-                  symbol: "Si",
-                  value: predictions.additions.si_add_kg,
-                  unit: "kg",
-                  color: "from-gray-200 to-gray-300",
-                  borderColor: "border-gray-400",
-                  textColor: "text-gray-800",
-                  iconBg: "bg-gray-200",
-                  progress: 78,
-                },
-              ].map((item, index) => (
-                <div
-                  key={index}
-                  className={`relative p-6 rounded-2xl bg-gradient-to-br ${item.color} border-2 ${item.borderColor} shadow-lg hover:shadow-xl transition-all duration-300 transform hover:scale-105`}
-                >
-                  <div className="flex items-center justify-between mb-4">
-                    <div className={`p-3 ${item.iconBg} rounded-xl`}>
-                      <span className={`text-2xl font-bold ${item.textColor}`}>
-                        {item.symbol}
-                      </span>
-                    </div>
-                    <div className="text-right">
-                      <div className={`text-3xl font-bold ${item.textColor}`}>
-                        {item.value.toFixed(2)}
-                      </div>
-                      <div className={`text-sm ${item.textColor} opacity-80`}>
-                        {item.unit}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="mb-4">
-                    <div
-                      className={`text-lg font-semibold ${item.textColor} mb-2`}
-                    >
-                      {item.metal}
-                    </div>
-                    <div className="w-full bg-white/50 rounded-full h-2">
-                      <div
-                        className={`bg-gradient-to-r ${
-                          item.progress > 90
-                            ? "from-emerald-400 to-emerald-500"
-                            : "from-gray-400 to-gray-500"
-                        } h-2 rounded-full transition-all duration-1000`}
-                        style={{ width: `${item.progress}%` }}
-                      ></div>
-                    </div>
-                    <div
-                      className={`text-xs ${item.textColor} opacity-70 mt-1`}
-                    >
-                      Optimization: {item.progress}%
-                    </div>
-                  </div>
-
-                  <div
-                    className={`text-xs ${item.textColor} opacity-80 bg-white/30 p-2 rounded-lg`}
-                  >
-                    Target composition achieved with minimal waste
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </Card>
-
-        {/* Process Recommendations */}
-        <Card className="bg-white border-gray-200 shadow-xl rounded-2xl">
-          <div className="bg-gradient-to-r from-emerald-50 to-gray-50 p-6 border-b border-gray-200">
-            <div className="flex items-center space-x-3">
-              <div className="p-2 bg-emerald-100 rounded-lg">
-                <Cpu className="w-6 h-6 text-emerald-600" />
-              </div>
-              <div>
-                <h3 className="text-2xl font-bold text-gray-800">
-                  AI Process Recommendations
-                </h3>
-                <p className="text-gray-600">
-                  Intelligent optimization suggestions
-                </p>
-              </div>
-            </div>
-          </div>
-
-          <div className="p-6">
-            <div className="space-y-4">
-              {predictions.process_recommendations.map((rec, index) => (
-                <div
-                  key={index}
-                  className={`p-5 rounded-xl border-l-4 ${
-                    rec.priority === "High"
-                      ? "border-emerald-500 bg-emerald-50"
-                      : "border-gray-400 bg-gray-50"
-                  } hover:shadow-lg transition-all duration-300`}
-                >
-                  <div className="flex items-start justify-between">
-                    <div className="flex-1">
-                      <div className="flex items-center space-x-3 mb-2">
-                        <h4 className="font-bold text-gray-800 text-lg">
-                          {rec.title}
-                        </h4>
-                        <span
-                          className={`px-3 py-1 rounded-full text-xs font-semibold ${
-                            rec.priority === "High"
-                              ? "bg-emerald-100 text-emerald-700"
-                              : "bg-gray-100 text-gray-700"
-                          }`}
-                        >
-                          {rec.priority} Priority
-                        </span>
-                      </div>
-                      <p className="text-gray-600 mb-3 leading-relaxed">
-                        {rec.description}
-                      </p>
-                      <div className="flex items-center space-x-4">
-                        <div className="flex items-center space-x-1">
-                          <TrendingUp className="w-4 h-4 text-emerald-500" />
-                          <span className="text-sm font-semibold text-emerald-600">
-                            Est. Savings: {rec.estimated_savings}
-                          </span>
-                        </div>
-                      </div>
-                    </div>
-                    <div
-                      className={`p-2 rounded-lg ${
-                        rec.priority === "High"
-                          ? "bg-emerald-100"
-                          : "bg-gray-100"
-                      }`}
-                    >
-                      {rec.priority === "High" ? (
-                        <Flame className="w-5 h-5 text-emerald-600" />
-                      ) : (
-                        <Wrench className="w-5 h-5 text-gray-600" />
-                      )}
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </Card>
-
-        {/* Environmental Impact */}
-        <Card className="bg-white border-gray-200 shadow-xl rounded-2xl">
-          <div className="bg-gradient-to-r from-gray-50 to-emerald-50 p-6 border-b border-gray-200">
-            <div className="flex items-center space-x-3">
-              <div className="p-2 bg-emerald-100 rounded-lg">
-                <Shield className="w-6 h-6 text-emerald-600" />
-              </div>
-              <div>
-                <h3 className="text-2xl font-bold text-gray-800">
-                  Environmental Impact
-                </h3>
-                <p className="text-gray-600">
-                  Sustainability metrics and improvements
-                </p>
-              </div>
-            </div>
-          </div>
-
-          <div className="p-6">
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-              <div className="bg-emerald-50 p-6 rounded-xl border border-emerald-200">
-                <div className="text-center">
-                  <div className="w-16 h-16 mx-auto bg-emerald-100 rounded-2xl flex items-center justify-center mb-4">
-                    <Activity className="w-8 h-8 text-emerald-600" />
-                  </div>
-                  <div className="text-2xl font-bold text-gray-800 mb-1">
-                    {predictions.environmental_impact.co2_reduction.toFixed(1)}{" "}
-                    tons
-                  </div>
-                  <div className="text-sm text-gray-600 font-medium">
-                    CO₂ Reduction
-                  </div>
-                </div>
-              </div>
-
-              <div className="bg-gray-50 p-6 rounded-xl border border-gray-200">
-                <div className="text-center">
-                  <div className="w-16 h-16 mx-auto bg-gray-100 rounded-2xl flex items-center justify-center mb-4">
-                    <RotateCcw className="w-8 h-8 text-gray-600" />
-                  </div>
-                  <div className="text-2xl font-bold text-gray-800 mb-1">
-                    {predictions.environmental_impact.waste_reduction.toFixed(
-                      1
-                    )}
-                    %
-                  </div>
-                  <div className="text-sm text-gray-600 font-medium">
-                    Waste Reduction
-                  </div>
-                </div>
-              </div>
-
-              <div className="bg-emerald-50 p-6 rounded-xl border border-emerald-200">
-                <div className="text-center">
-                  <div className="w-16 h-16 mx-auto bg-emerald-100 rounded-2xl flex items-center justify-center mb-4">
-                    <Target className="w-8 h-8 text-emerald-600" />
-                  </div>
-                  <div className="text-2xl font-bold text-gray-800 mb-1">
-                    {predictions.environmental_impact.water_savings.toFixed(0)}L
-                  </div>
-                  <div className="text-sm text-gray-600 font-medium">
-                    Water Savings
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </Card>
-
-        {/* Deviation Analysis */}
-        <Card className="bg-white border-gray-200 shadow-xl rounded-2xl">
-          <div className="bg-gradient-to-r from-gray-50 to-gray-100 p-6 border-b border-gray-200">
-            <div className="flex items-center space-x-3">
-              <div className="p-2 bg-gray-100 rounded-lg">
-                <AlertTriangle className="w-6 h-6 text-gray-600" />
-              </div>
-              <h3 className="text-2xl font-bold text-gray-800">
-                Process Analysis & Insights
-              </h3>
-            </div>
-          </div>
-
-          <div className="p-6">
-            <div className="bg-gray-50 p-6 rounded-xl border border-gray-200">
-              <h4 className="font-bold text-gray-800 text-lg mb-3 flex items-center">
-                <AlertCircle className="w-5 h-5 text-gray-600 mr-2" />
-                Deviation Analysis
-              </h4>
-              <p className="text-gray-700 leading-relaxed mb-4">
-                {predictions.deviation_reason}
-              </p>
-
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-6">
-                {[
-                  {
-                    title: "Mechanical Properties",
-                    value: predictions.impact_analysis.mechanical_properties,
-                    icon: Settings,
-                  },
-                  {
-                    title: "Corrosion Resistance",
-                    value: predictions.impact_analysis.corrosion_resistance,
-                    icon: Shield,
-                  },
-                  {
-                    title: "Production Timeline",
-                    value: predictions.impact_analysis.production_delay,
-                    icon: Clock,
-                  },
-                ].map((item, index) => {
-                  const Icon = item.icon;
+              {Object.entries(predictions.predicted_additions || {}).map(
+                ([key, val]) => {
+                  const symbol = key.replace(/_add_kg$/i, "");
                   return (
                     <div
-                      key={index}
-                      className="bg-white p-4 rounded-lg border border-gray-200"
+                      key={key}
+                      className="p-5 rounded-2xl border border-gray-200 bg-gradient-to-br from-white to-gray-50 shadow hover:shadow-lg transition-all duration-300"
                     >
-                      <div className="flex items-center space-x-2 mb-2">
-                        <Icon className="w-4 h-4 text-emerald-600" />
-                        <h5 className="font-semibold text-gray-800 text-sm">
-                          {item.title}
-                        </h5>
+                      <div className="flex items-start justify-between mb-4">
+                        <div className="flex items-center space-x-3">
+                          <div className="w-12 h-12 rounded-xl bg-emerald-100 flex items-center justify-center shadow-inner">
+                            <Beaker className="w-6 h-6 text-emerald-600" />
+                          </div>
+                          <div>
+                            <div className="text-sm font-medium text-gray-500">
+                              {symbol.toUpperCase()}
+                            </div>
+                            <div className="text-xl font-bold text-gray-800">
+                              {typeof val === "number" ? val.toFixed(2) : "--"}{" "}
+                              kg
+                            </div>
+                          </div>
+                        </div>
                       </div>
-                      <p className="text-sm text-gray-600">{item.value}</p>
+                      <div className="text-xs text-gray-500 font-medium mt-2">
+                        Optimized addition for composition alignment
+                      </div>
                     </div>
                   );
-                })}
-              </div>
-            </div>
-          </div>
-        </Card>
-
-        {/* AI Notes - Enhanced */}
-        <Card className="bg-gradient-to-br from-emerald-50 to-gray-50 border-emerald-200 shadow-xl rounded-2xl">
-          <div className="p-6">
-            <div className="flex items-center space-x-3 mb-4">
-              <div className="p-2 bg-emerald-100 rounded-lg">
-                <TrendingUp className="w-6 h-6 text-emerald-600" />
-              </div>
-              <h3 className="text-2xl font-bold text-gray-800">
-                AI System Summary
-              </h3>
-            </div>
-            <div className="bg-white p-6 rounded-xl border border-emerald-200 shadow-sm">
-              <div className="flex items-start space-x-4">
-                <div className="p-2 bg-emerald-100 rounded-lg">
-                  <Layers className="w-5 h-5 text-emerald-600" />
-                </div>
-                <div className="flex-1">
-                  <p className="text-gray-700 leading-relaxed text-lg">
-                    {predictions.notes}
-                  </p>
-                  <div className="mt-4 flex items-center space-x-4 text-sm text-gray-600">
-                    <span className="flex items-center space-x-1">
-                      <CheckCircle className="w-4 h-4 text-emerald-500" />
-                      <span>Optimized</span>
-                    </span>
-                    <span className="flex items-center space-x-1">
-                      <Target className="w-4 h-4 text-emerald-500" />
-                      <span>Validated</span>
-                    </span>
-                    <span className="flex items-center space-x-1">
-                      <Award className="w-4 h-4 text-emerald-500" />
-                      <span>Quality Assured</span>
-                    </span>
-                  </div>
-                </div>
-              </div>
+                }
+              )}
             </div>
           </div>
         </Card>
